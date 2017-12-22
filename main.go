@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +21,11 @@ var lightRoutes = rata.Routes{
 }
 
 var light lights.Light
+
+type updateRequest struct {
+	Blink *time.Duration `json:"blink"`
+	On    *bool          `json:"on"`
+}
 
 func main() {
 	pfd := piface.NewPiFaceDigital(spi.DEFAULT_HARDWARE_ADDR, spi.DEFAULT_BUS, spi.DEFAULT_CHIP)
@@ -44,8 +51,41 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, string(l))
 		}),
-		"blink_light": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			light.Blink(time.Second, sigs)
+		"update_light": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, err := ioutil.ReadAll(r.Body)
+			defer r.Body.Close()
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+
+			// Unmarshal
+			var req updateRequest
+			err = json.Unmarshal(b, &req)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+
+			if req.Blink != nil {
+				blink := *req.Blink
+				light.Blink(blink, sigs)
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, "blinking on %s duration", blink.String())
+				return
+			}
+
+			if req.On != nil {
+				light.StopBlinking()
+
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, "turning light %v", *req.On)
+				if *req.On {
+					light.On()
+				}
+				light.Off()
+				return
+			}
 		}),
 	}
 
@@ -60,8 +100,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	http.Handle("/api", router)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+
+	go func() {
+		fmt.Println("listening on 8080")
+		log.Fatal(http.ListenAndServe(":8080", router))
+		exit <- true
+	}()
 
 	fmt.Println("awaiting signal")
 	<-exit
